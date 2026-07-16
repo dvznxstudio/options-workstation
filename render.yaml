@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: options-workstation-api
+    runtime: python
+    rootDir: backend
+    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+
+  - type: cron
+    name: options-workstation-collector
+    runtime: python
+    rootDir: backend
+    schedule: "*/5 13-21 * * 1-5"
+    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+    startCommand: python worker.py
+
+  - type: cron
+    name: options-workstation-occ-import
+    runtime: python
+    rootDir: backend
+    schedule: "45 12 * * 1-5"
+    buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+    startCommand: python occ_worker.py
