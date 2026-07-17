@@ -1,81 +1,76 @@
-# Options Workstation Phase 4 + 5
+# Options Workstation v6 — Institutional Decision Engine
 
-This release combines:
+This build uses a Fincept-inspired modular architecture without copying Fincept source code.
 
-## Phase 4
-- Persistent PostgreSQL/SQLite market snapshots
-- Five-minute scheduled collector
-- Scenario event lifecycle detection
-- Roadmap direction-change events
-- Conviction-jump events
-- Email delivery through SMTP
-- Snapshot and event history API
-- History tab in the frontend
+## Core upgrades
 
-## Phase 5
-- Official OCC CSV importer
-- Manual official-file upload
-- Configurable scheduled OCC download URL
-- Prior-day call and put walls
-- Day-over-day call/put wall migration
-- Day-over-day call/put OI changes
-- Morning briefing endpoint
-- Official structural values added to roadmap metrics
+- Provider registry with automatic fallback
+- Optional Databento futures connector
+- Today, Week, Month, and Combined decision engines
+- Expiration-aware option-chain filtering
+- Distance-aware strike filtering
+- Distant mathematical levels hidden from actionable roadmaps
+- ES/MES, NQ/MNQ, and RTY/M2K futures leadership
+- Evidence scorecard instead of an unexplained probability
+- Multi-timeframe interpretation
+- Existing history, OCC, database, event, and alert features remain included
 
-## Database
+## Why the $584-type level is fixed
 
-For production, create a Render PostgreSQL database and add its Internal Database URL as:
+Each timeframe uses a separate relevance window:
 
-DATABASE_URL
+- Today: expirations up to 2 days and strikes about 3.5% from spot
+- Week: expirations up to 10 days and strikes about 9% from spot
+- Month: expirations up to 45 days and strikes about 18% from spot
 
-Without it, the backend uses SQLite. SQLite storage on an ephemeral Render filesystem may be lost during redeploys.
+Levels outside that window are not shown as actionable levels.
 
-## Required Render environment variables
+## Databento
 
-PERSONAL_ACCESS_CODE
-TOKEN_SECRET
-FRONTEND_ORIGIN=https://options-workstation.vercel.app
-DATABASE_URL=<Render Postgres internal URL>
-SUPPORTED_SYMBOLS=SPY,QQQ,IWM
-CRON_SECRET=<long random value>
+Add this optional Render environment variable:
 
-## Optional email variables
+DATABENTO_API_KEY=db-your-key
 
-SMTP_HOST
-SMTP_PORT=587
-SMTP_USERNAME
-SMTP_PASSWORD
-ALERT_EMAIL_FROM
-ALERT_EMAIL_TO
+Without a key, futures analysis automatically falls back to Yahoo chart data.
 
-## OCC configuration
+Databento mappings:
 
-The official OCC importer supports two methods:
+- ES / MES / NQ / MNQ / RTY / M2K
+- CL and GC
+- Dataset: GLBX.MDP3
+- Continuous volume-ranked symbols such as ES.v.0
 
-1. Upload an official OCC CSV using `POST /api/occ/upload` in `/docs`.
-2. Set `OCC_OI_URL_TEMPLATE` to the official downloadable file URL.
+## API
 
-The URL template can contain:
+GET /api/roadmap/SPY?timeframe=today
+GET /api/roadmap/SPY?timeframe=week
+GET /api/roadmap/SPY?timeframe=month
+GET /api/roadmap/SPY?timeframe=combined
+GET /api/futures-leadership/SPY?interval=5m
 
-{date}       -> YYYY-MM-DD
-{yyyymmdd}   -> YYYYMMDD
-{mmddyyyy}   -> MMDDYYYY
+## Evidence scorecard
 
-If the current official OCC download address is not configured, the scheduled OCC job will fail clearly while the rest of the workstation remains operational.
+- Options positioning
+- Price structure
+- Trend alignment
+- Futures leadership
+- Data quality
+
+The overall conviction score measures alignment of observable evidence. It is not claimed to be a guaranteed win probability.
 
 ## Deployment
 
-Replace both `backend/` and `frontend/` with this release.
+Replace both frontend and backend folders.
 
-Render web service:
+Render:
 - Root: backend
-- Build: `python -m pip install --upgrade pip && python -m pip install -r requirements.txt`
-- Start: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-- Health: `/health`
+- Build: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+- Start: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+- Health: /health
 
 Vercel:
 - Root: frontend
-- `NEXT_PUBLIC_API_URL=https://options-workstation.onrender.com`
+- NEXT_PUBLIC_API_URL=https://options-workstation.onrender.com
 
-Expected backend health:
-`{"status":"ok","version":"5.0.0"}`
+Expected health:
+{"status":"ok","version":"6.0.0"}

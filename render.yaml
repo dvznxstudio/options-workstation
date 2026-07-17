@@ -22,3 +22,7 @@ services:
     schedule: "45 12 * * 1-5"
     buildCommand: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
     startCommand: python occ_worker.py
+
+
+# Optional environment variable for the premium futures/data connector:
+# DATABENTO_API_KEY=db-...

@@ -1,0 +1,191 @@
+"use client";
+
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+
+type Tab = "roadmap" | "levels" | "flow" | "history" | "alerts";
+type Timeframe = "today" | "week" | "month" | "combined";
+type Level = { name:string; price:number; role:string; strength:number; side:"above"|"below"|"near" };
+type Scenario = { id:string; name:string; direction:"bullish"|"bearish"|"neutral"; status:"forming"|"active"|"invalidated"; trigger_price:number; trigger:string; target1:number; target2?:number|null; invalidation:number; conviction:number; reasons:string[]; cautions:string[] };
+type FlowPoint = { strike:number; net_gex:number; net_dex:number; call_oi:number; put_oi:number; call_volume:number; put_volume:number; volume_diff:number };
+type Roadmap = { symbol:string; spot:number; source:string; is_live:boolean; updated_at:string; regime:string; bias:string; conviction:number; expected_move:{low:number;high:number;points:number;expiration?:string|null}; levels:Level[]; scenarios:Scenario[]; briefing:string; warnings:string[]; flow:FlowPoint[]; metrics:Record<string,number|string|null> };
+type AlertRule = { id:string; name:string; type:"above"|"below"; price:number; enabled:boolean; fired:boolean };
+type Snapshot = { captured_at:string; spot:number; bias:string; conviction:number; bullish_score?:number|null; bearish_score?:number|null; bullish_status?:string|null; bearish_status?:string|null; vwap?:number|null; call_wall?:number|null; put_wall?:number|null };
+type ServerEvent = { id:number; created_at:string; event_type:string; direction:string; title:string; message:string; price?:number|null; conviction?:number|null; delivered:boolean };
+
+const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
+const TOKEN_KEY = "ow_personal_token";
+const ALERTS_KEY = "ow_personal_alerts";
+
+function fmt(value:number|string|null|undefined):string {
+  if (typeof value !== "number") return value == null ? "—" : String(value);
+  const a = Math.abs(value);
+  if (a >= 1_000_000_000) return `${(value/1_000_000_000).toFixed(2)}B`;
+  if (a >= 1_000_000) return `${(value/1_000_000).toFixed(2)}M`;
+  if (a >= 1_000) return `${(value/1_000).toFixed(1)}K`;
+  return value.toFixed(2);
+}
+
+export default function Home() {
+  const [token,setToken] = useState("");
+  const [accessCode,setAccessCode] = useState("");
+  const [loginError,setLoginError] = useState("");
+  const [tab,setTab] = useState<Tab>("roadmap");
+  const [symbol,setSymbol] = useState("SPY");
+  const [timeframe,setTimeframe] = useState<Timeframe>("today");
+  const [data,setData] = useState<Roadmap|null>(null);
+  const [error,setError] = useState("");
+  const [loading,setLoading] = useState(false);
+  const [alerts,setAlerts] = useState<AlertRule[]>([]);
+  const [newAlertPrice,setNewAlertPrice] = useState("");
+  const [newAlertType,setNewAlertType] = useState<"above"|"below">("above");
+  const [history,setHistory] = useState<Snapshot[]>([]);
+  const [events,setEvents] = useState<ServerEvent[]>([]);
+
+  useEffect(() => {
+    setToken(window.localStorage.getItem(TOKEN_KEY) ?? "");
+    const raw = window.localStorage.getItem(ALERTS_KEY);
+    if (raw) { try { setAlerts(JSON.parse(raw)); } catch {} }
+  }, []);
+
+  useEffect(() => { window.localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts)); }, [alerts]);
+
+  const login = async (event:FormEvent) => {
+    event.preventDefault();
+    setLoginError("");
+    if (!API_URL) { setLoginError("Vercel is missing NEXT_PUBLIC_API_URL."); return; }
+    try {
+      const response = await fetch(`${API_URL}/api/login`, {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({access_code:accessCode})
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail ?? `Login failed (${response.status})`);
+      window.localStorage.setItem(TOKEN_KEY, body.token);
+      setToken(body.token);
+      setAccessCode("");
+    } catch (e) { setLoginError(e instanceof Error ? e.message : "Unable to sign in."); }
+  };
+
+  const logout = useCallback(() => {
+    window.localStorage.removeItem(TOKEN_KEY);
+    setToken(""); setData(null);
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!token || !API_URL) return;
+    setLoading(true); setError("");
+    try {
+      const response = await fetch(`${API_URL}/api/roadmap/${symbol}?timeframe=${timeframe}`, { headers:{Authorization:`Bearer ${token}`}, cache:"no-store" });
+      const body = await response.json().catch(() => ({}));
+      if (response.status === 401) { logout(); throw new Error("Session expired. Sign in again."); }
+      if (!response.ok) throw new Error(body.detail ?? `API error ${response.status}`);
+      setData(body as Roadmap);
+      const [historyResponse, eventsResponse] = await Promise.all([
+        fetch(`${API_URL}/api/history/${symbol}?hours=24&limit=100`, {headers:{Authorization:`Bearer ${token}`}, cache:"no-store"}),
+        fetch(`${API_URL}/api/events/${symbol}?limit=50`, {headers:{Authorization:`Bearer ${token}`}, cache:"no-store"})
+      ]);
+      if (historyResponse.ok) {
+        const historyBody = await historyResponse.json();
+        setHistory(historyBody.snapshots ?? []);
+      }
+      if (eventsResponse.ok) {
+        const eventsBody = await eventsResponse.json();
+        setEvents(eventsBody.events ?? []);
+      }
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load market data."); }
+    finally { setLoading(false); }
+  }, [token,symbol,logout]);
+
+  useEffect(() => {
+    if (!token) return;
+    load();
+    const id = window.setInterval(load, 120000);
+    return () => window.clearInterval(id);
+  }, [token,load]);
+
+  useEffect(() => {
+    if (!data) return;
+    const next = alerts.map(rule => {
+      if (!rule.enabled || rule.fired) return rule;
+      const hit = rule.type === "above" ? data.spot >= rule.price : data.spot <= rule.price;
+      if (!hit) return rule;
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification(`${data.symbol} alert`, {body:`${rule.name}. Current price: ${data.spot.toFixed(2)}`});
+      }
+      return {...rule,fired:true};
+    });
+    if (JSON.stringify(next) !== JSON.stringify(alerts)) setAlerts(next);
+  }, [data,alerts]);
+
+  const sortedFlow = useMemo(() => data ? [...data.flow].sort((a,b)=>Math.abs(b.volume_diff)-Math.abs(a.volume_diff)) : [], [data]);
+
+  if (!token) return (
+    <main className="center loginShell">
+      <form className="loginCard" onSubmit={login}>
+        <span className="brandMark large">OW</span>
+        <h1>Options Workstation</h1><p>Private personal access</p>
+        <input type="password" placeholder="Access code" value={accessCode} onChange={e=>setAccessCode(e.target.value)} />
+        {loginError && <div className="formError">{loginError}</div>}
+        <button className="primary" type="submit">Open workstation</button>
+        <small className="apiStatus">API: {API_URL || "not configured"}</small>
+      </form>
+    </main>
+  );
+
+  if (loading && !data) return <main className="center"><div className="loader"/><h1>Loading Trade GPS</h1></main>;
+  if (!data) return <main className="center"><h1>Data connection issue</h1><p>{error}</p><button className="primary" onClick={load}>Try again</button><button className="ghost" onClick={logout}>Sign out</button></main>;
+
+  const addAlert = () => {
+    const price = Number(newAlertPrice); if (!Number.isFinite(price) || price<=0) return;
+    setAlerts(v=>[...v,{id:crypto.randomUUID(),name:`${symbol} ${newAlertType} ${price.toFixed(2)}`,type:newAlertType,price,enabled:true,fired:false}]);
+    setNewAlertPrice("");
+  };
+
+  return <main>
+    <header className="topbar"><div className="brand"><span className="brandMark">OW</span><div><h1>Options Workstation</h1><p>Personal Trade GPS</p></div></div>
+      <div className="headerActions"><select value={symbol} onChange={e=>setSymbol(e.target.value)}><option>SPY</option><option>QQQ</option><option>IWM</option></select><button className="refresh" onClick={load}>{loading?"…":"↻"}</button><button className="ghost compact" onClick={logout}>Exit</button></div>
+    </header>
+    {!data.is_live && <div className="warningBanner">Live data unavailable. Do not use fallback values for trading.</div>}
+    <section className="hero"><div><span className="symbol">{data.symbol}</span><strong className="spot">${data.spot.toFixed(2)}</strong><p>{data.bias}</p></div><div className={`score ${data.is_live?"":"scoreOff"}`}><strong>{data.conviction}</strong><span>conviction</span></div></section>
+    
+        <div className="timeframeSelector">
+          {(["today","week","month","combined"] as Timeframe[]).map(item=>
+            <button key={item} className={timeframe===item?"active":""} onClick={()=>setTimeframe(item)}>
+              {item==="today"?"Today":item==="week"?"Week":item==="month"?"Month":"Combined"}
+            </button>
+          )}
+        </div>
+
+      <nav className="tabs">{(["roadmap","levels","flow","history","alerts"] as Tab[]).map(x=><button key={x} className={tab===x?"active":""} onClick={()=>setTab(x)}>{x}</button>)}</nav>
+
+    {tab==="roadmap" && <>
+      <section className="metrics"><article><span>Regime</span><strong>{data.regime}</strong><small>{data.source}</small></article><article><span>Expected Low</span><strong>${data.expected_move.low.toFixed(2)}</strong></article><article><span>Expected High</span><strong>${data.expected_move.high.toFixed(2)}</strong></article><article><span>Updated</span><strong>{new Date(data.updated_at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</strong></article></section>
+      <section className="panel briefing"><h2>Trade GPS briefing</h2><p>{data.briefing}</p></section>
+      <section><h2>Scenario roadmap</h2><div className="scenarioGrid">{data.scenarios.map(s=><article className={`scenario ${s.direction}`} key={s.id}><div className="scenarioHead"><div><span>{s.status}</span><h3>{s.name}</h3></div><b>{s.conviction}</b></div><div className="trigger"><span>Activation trigger</span><p>{s.trigger}</p></div><div className="targets"><div><span>Target 1</span><strong>${s.target1.toFixed(2)}</strong></div><div><span>Target 2</span><strong>{s.target2?`$${s.target2.toFixed(2)}`:"—"}</strong></div><div><span>Invalidation</span><strong>${s.invalidation.toFixed(2)}</strong></div></div><div className="reasons">{s.reasons.map(r=><p key={r}>✓ {r}</p>)}{s.cautions.map(c=><p className="caution" key={c}>⚠ {c}</p>)}</div></article>)}</div></section>
+    </>}
+
+    {tab==="levels" && <section><h2>Institutional level map</h2><div className="metrics"><article><span>Net GEX</span><strong>{fmt(data.metrics.net_gex)}</strong></article><article><span>Net DEX</span><strong>{fmt(data.metrics.net_dex)}</strong></article><article><span>Put / Call OI</span><strong>{fmt(data.metrics.put_call_oi_ratio)}</strong></article><article><span>Put / Call Volume</span><strong>{fmt(data.metrics.put_call_volume_ratio)}</strong></article></div><div className="levels">{data.levels.map(l=><article className="level" key={`${l.name}-${l.price}`}><div><strong>{l.name}</strong><span>{l.role} · {l.side} spot</span></div><b>${l.price.toFixed(2)}</b><div className="bar"><i style={{width:`${l.strength}%`}}/></div></article>)}</div></section>}
+
+    {tab==="flow" && <section><h2>Flow and concentration</h2><div className="tableWrap"><table><thead><tr><th>Strike</th><th>Net GEX</th><th>Call OI</th><th>Put OI</th><th>Vol Diff</th></tr></thead><tbody>{sortedFlow.slice(0,24).map(r=><tr key={r.strike}><td>${r.strike.toFixed(2)}</td><td>{fmt(r.net_gex)}</td><td>{fmt(r.call_oi)}</td><td>{fmt(r.put_oi)}</td><td className={r.volume_diff>=0?"positive":"negative"}>{fmt(r.volume_diff)}</td></tr>)}</tbody></table></div></section>}
+
+
+    {tab==="history" && <section>
+      <h2>Snapshot history and server events</h2>
+      <div className="metrics">
+        <article><span>Stored snapshots</span><strong>{history.length}</strong></article>
+        <article><span>Latest bull score</span><strong>{fmt(history[0]?.bullish_score)}</strong></article>
+        <article><span>Latest bear score</span><strong>{fmt(history[0]?.bearish_score)}</strong></article>
+        <article><span>Server events</span><strong>{events.length}</strong></article>
+      </div>
+      <div className="tableWrap"><table><thead><tr><th>Time</th><th>Spot</th><th>Conviction</th><th>Bull</th><th>Bear</th><th>VWAP</th><th>Bias</th></tr></thead>
+      <tbody>{history.slice(0,40).map((row,index)=><tr key={`${row.captured_at}-${index}`}><td>{new Date(row.captured_at).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}</td><td>${row.spot.toFixed(2)}</td><td>{row.conviction}</td><td>{fmt(row.bullish_score)}</td><td>{fmt(row.bearish_score)}</td><td>{fmt(row.vwap)}</td><td>{row.bias}</td></tr>)}</tbody></table></div>
+      <h2>Event timeline</h2>
+      <div className="alertList">{events.length===0&&<p>No server-side events have fired yet.</p>}{events.map(event=><article className="alertRow" key={event.id}><div><strong>{event.title}</strong><span>{new Date(event.created_at).toLocaleString()} · {event.delivered?"Email delivered":"Stored only"}</span><p>{event.message}</p></div></article>)}</div>
+    </section>}
+
+    {tab==="alerts" && <section><h2>Personal alerts</h2><div className="panel alertBuilder"><div className="alertForm"><select value={newAlertType} onChange={e=>setNewAlertType(e.target.value as "above"|"below")}><option value="above">Price above</option><option value="below">Price below</option></select><input inputMode="decimal" placeholder="Price" value={newAlertPrice} onChange={e=>setNewAlertPrice(e.target.value)}/><button className="primary" onClick={addAlert}>Add alert</button></div><button className="ghost" onClick={()=>"Notification" in window && Notification.requestPermission()}>Enable browser notifications</button></div><div className="alertList">{alerts.length===0&&<p>No personal alerts yet.</p>}{alerts.map(a=><article className="alertRow" key={a.id}><div><strong>{a.name}</strong><span>{a.fired?"Triggered":a.enabled?"Watching":"Paused"}</span></div><div><button className="ghost compact" onClick={()=>setAlerts(v=>v.map(x=>x.id===a.id?{...x,enabled:!x.enabled,fired:false}:x))}>{a.enabled?"Pause":"Enable"}</button><button className="danger compact" onClick={()=>setAlerts(v=>v.filter(x=>x.id!==a.id))}>Delete</button></div></article>)}</div></section>}
+
+    <section className="warnings">{data.warnings.map(w=><p key={w}>• {w}</p>)}</section><footer>Personal research tool. Wait for confirmation and use defined risk.</footer>
+  </main>;
+}
